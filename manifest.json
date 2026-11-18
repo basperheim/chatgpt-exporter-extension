@@ -1,11 +1,24 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Visual Exporter",
-  "version": "1.0.0",
-  "description": "Export ChatGPT conversations or selected elements as styled HTML with light and original PDF printing modes.",
-  "permissions": ["activeTab", "scripting"],
+  "version": "1.1.0",
+  "description": "Export styled ChatGPT conversations to searchable PDFs or standalone HTML.",
+  "permissions": ["activeTab", "scripting", "debugger", "downloads"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "action": {
     "default_title": "Export ChatGPT conversation",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
   }
 }
