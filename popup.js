@@ -1,21 +1,24 @@
 "use strict";
 
 const status = document.getElementById("status");
+const formatSelect = document.getElementById("format");
 const buttons = [...document.querySelectorAll("button[data-mode]")];
 
-async function beginExport(mode) {
-  buttons.forEach((button) => {
-    button.disabled = true;
-  });
+const savedFormat = localStorage.getItem("chatgpt-export-format");
+formatSelect.value = ["pdf-light", "pdf-original", "html"].includes(savedFormat)
+  ? savedFormat
+  : "pdf-light";
 
+formatSelect.addEventListener("change", () => {
+  localStorage.setItem("chatgpt-export-format", formatSelect.value);
+});
+
+async function beginExport(mode) {
+  buttons.forEach((button) => { button.disabled = true; });
   status.textContent = "Preparing exporter...";
 
   try {
-    const [tab] = await chrome.tabs.query({
-      active: true,
-      currentWindow: true,
-    });
-
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (
       !tab?.id ||
       !/^https:\/\/(chatgpt\.com|chat\.openai\.com)(\/|$)/i.test(tab.url || "")
@@ -28,24 +31,20 @@ async function beginExport(mode) {
       files: ["exporter.js"],
     });
 
-    const result = await chrome.tabs.sendMessage(tab.id, {
+    const response = await chrome.tabs.sendMessage(tab.id, {
       type: "CHATGPT_VISUAL_EXPORTER_START",
       mode,
+      format: formatSelect.value,
     });
 
-    if (!result?.ok) {
-      throw new Error(result?.error || "Could not start the export.");
+    if (!response?.ok) {
+      throw new Error(response?.error || "Could not start the export.");
     }
 
-    // Close the popup so the user can interact
-    // with the page's element picker.
     window.close();
   } catch (error) {
     status.textContent = error instanceof Error ? error.message : String(error);
-
-    buttons.forEach((button) => {
-      button.disabled = false;
-    });
+    buttons.forEach((button) => { button.disabled = false; });
   }
 }
 

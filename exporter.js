@@ -7,7 +7,6 @@
   globalThis.__chatgptVisualExporterLoaded = true;
 
   const CONFIG = {
-    filename: "chatgpt-visual-export.html",
     autoScroll: true,
     scrollDelayMs: 180,
     maximumScrollSteps: 700,
@@ -106,6 +105,7 @@
 
   let busy = false;
   let notice = null;
+  let outputFormat = "html";
 
   function showNotice(message, isError = false) {
     if (!notice) {
@@ -883,7 +883,7 @@
   /**
    * Build the standalone HTML document.
    */
-  function buildHTML({ documentRoot, count }) {
+  function buildHTML({ documentRoot, count }, printTheme = CONFIG.defaultPrintTheme) {
     const computed = getComputedStyle(document.documentElement);
 
     const isDark =
@@ -937,7 +937,7 @@
 
     const outputHTML = [
       "<!doctype html>",
-      `<html lang="en" data-print-theme="${CONFIG.defaultPrintTheme}">`,
+      `<html lang="en" data-print-theme="${printTheme}">`,
       "<head>",
       '<meta charset="utf-8">',
       '<meta name="viewport" content="width=device-width, initial-scale=1">',
@@ -959,17 +959,81 @@
     };
   }
 
+
+  /**
+   * Resolve the title of the active thread, not an arbitrary sidebar entry.
+   * Use textContent; the nested markup itself is not part of the title.
+   */
+  function getConversationTitle() {
+    const currentPath = location.pathname.replace(/\/$/, "");
+    const link = [...document.querySelectorAll("a[href]")].find((node) => {
+      try {
+        const url = new URL(node.href, location.href);
+        return url.origin === location.origin &&
+          url.pathname.replace(/\/$/, "") === currentPath &&
+          node.querySelector('[data-thread-title="true"]');
+      } catch {
+        return false;
+      }
+    });
+
+    const titleElement = link?.querySelector(
+      '[data-thread-title="true"] [data-marquee-content="true"] [dir="auto"]'
+    ) || link?.querySelector('[data-thread-title="true"]');
+
+    const title = titleElement?.textContent?.trim();
+    const tabTitle = document.title.replace(/\s*[-–|]\s*ChatGPT\s*$/i, "").trim();
+
+    return title || (tabTitle && !/^chatgpt$/i.test(tabTitle)
+      ? tabTitle
+      : "ChatGPT Conversation");
+  }
+
+  function makeExportFilename(extension, scope = "conversation") {
+    const slug = getConversationTitle()
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/&/g, " and ")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 90)
+      .replace(/-+$/g, "") || "chatgpt-conversation";
+
+    return slug + (scope === "conversation" ? "" : "-" + scope) + "." + extension;
+  }
+
+  async function saveExport(result, scope) {
+    if (outputFormat === "html") {
+      downloadHTML(result.outputHTML, makeExportFilename("html", scope));
+      showNotice("HTML downloaded. Open it to choose a PDF style.");
+      return;
+    }
+
+    const response = await chrome.runtime.sendMessage({
+      type: "CHATGPT_VISUAL_EXPORTER_PRINT_PDF",
+      html: result.outputHTML,
+      filename: makeExportFilename("pdf", scope),
+    });
+
+    if (!response?.ok) {
+      throw new Error(response?.error || "Could not create the PDF.");
+    }
+
+    showNotice("PDF download started.");
+  }
+
   /**
    * Download HTML directly from the page.
    */
-  function downloadHTML(outputHTML) {
+  function downloadHTML(outputHTML, filename) {
     const blob = new Blob([outputHTML], { type: "text/html;charset=utf-8" });
 
     const objectURL = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
 
     anchor.href = objectURL;
-    anchor.download = CONFIG.filename;
+    anchor.download = filename;
     anchor.style.display = "none";
 
     document.documentElement.appendChild(anchor);
@@ -985,7 +1049,7 @@
   /**
    * Export a single message or component.
    */
-  async function exportSelection(element) {
+  async function exportSelection(element, scope = "element") {
     if (busy) return;
 
     busy = true;
@@ -994,11 +1058,9 @@
     try {
       await nextFrame();
 
-      const result = buildHTML(captureSelection(element));
-
-      downloadHTML(result.outputHTML);
-
-      showNotice("HTML downloaded. Open it to choose a PDF style.");
+      const theme = outputFormat === "pdf-original" ? "original" : "light";
+      const result = buildHTML(captureSelection(element), theme);
+      await saveExport(result, scope);
 
       setTimeout(hideNotice, 6000);
     } catch (error) {
@@ -1028,11 +1090,9 @@
         ? await captureConversation(root)
         : captureSelection(root);
 
-      const result = buildHTML(captured);
-
-      downloadHTML(result.outputHTML);
-
-      showNotice(`Downloaded ${result.count} conversation turn(s).`);
+      const theme = outputFormat === "pdf-original" ? "original" : "light";
+      const result = buildHTML(captured, theme);
+      await saveExport(result, "conversation");
 
       setTimeout(hideNotice, 6000);
     } catch (error) {
@@ -1145,7 +1205,7 @@
       // The export function now manages busy state.
       busy = false;
 
-      void exportSelection(chosen);
+      void exportSelection(chosen, mode);
     }
 
     function onKeydown(event) {
@@ -1183,6 +1243,12 @@
 
       return;
     }
+
+    if (!["html", "pdf-light", "pdf-original"].includes(message.format)) {
+      sendResponse({ ok: false, error: "Unknown export format." });
+      return;
+    }
+    outputFormat = message.format;
 
     if (message.mode === "conversation") {
       void exportConversation();
