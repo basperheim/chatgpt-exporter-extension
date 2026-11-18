@@ -141,20 +141,132 @@
     notice = null;
   }
 
+  const TURN_SELECTOR =
+    "[data-turn-key], [data-testid='conversation-turn']";
+
+  /**
+   * ChatGPT is a single-page application: older conversations can remain
+   * mounted after navigating to a new URL. Find the current thread by ID
+   * before using visual positioning as a fallback.
+   */
+  function getCurrentConversationId() {
+    const match = location.pathname.match(/(?:^|\/)c\/([^/]+)/);
+    return match ? decodeURIComponent(match[1]) : null;
+  }
+
+  function getTurnConversationId(turn) {
+    const selectors = [
+      "[data-chatgpt-selection-conversation-id]",
+      "[data-chatgpt-conversation-selection-target]",
+      "[data-conversation-id]",
+    ];
+
+    for (const selector of selectors) {
+      const element = turn.matches(selector)
+        ? turn
+        : turn.querySelector(selector);
+
+      if (!element) continue;
+
+      for (const attribute of [
+        "data-chatgpt-selection-conversation-id",
+        "data-chatgpt-conversation-selection-target",
+        "data-conversation-id",
+      ]) {
+        const id = element.getAttribute(attribute);
+        if (id) return id;
+      }
+    }
+
+    return null;
+  }
+
+  function isRenderedTurn(turn) {
+    if (!turn.isConnected || turn.getClientRects().length === 0) {
+      return false;
+    }
+
+    for (
+      let current = turn;
+      current && current !== document.documentElement;
+      current = current.parentElement
+    ) {
+      if (
+        current.hidden ||
+        current.inert ||
+        current.getAttribute("aria-hidden") === "true"
+      ) {
+        return false;
+      }
+
+      const style = getComputedStyle(current);
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.visibility === "collapse"
+      ) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  function intersectsViewport(element) {
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 &&
+      rect.bottom > 0 && rect.top < innerHeight &&
+      rect.right > 0 && rect.left < innerWidth;
+  }
+
   function findConversationRoot() {
-    const firstTurn = document.querySelector(
-      "[data-turn-key], [data-testid='conversation-turn']",
-    );
+    const expectedId = getCurrentConversationId();
+    const allTurns = [...document.querySelectorAll(TURN_SELECTOR)];
+    const renderedTurns = allTurns.filter(isRenderedTurn);
 
-    const main = firstTurn?.closest("main") || document.querySelector("main");
+    // Prefer the active conversation ID over document order.
+    // ChatGPT exposes the ID on some (but not necessarily all) turns.
+    const matchingTurns = expectedId
+      ? renderedTurns.filter(
+          (turn) => getTurnConversationId(turn) === expectedId
+        )
+      : [];
 
-    if (!main) {
+    const onScreen = (matchingTurns.length ? matchingTurns : renderedTurns)
+      .filter(intersectsViewport);
+
+    const anchor = onScreen.at(-1) || matchingTurns.at(-1) || null;
+
+    if (!anchor) {
       throw new Error(
-        "Could not find the ChatGPT conversation. Open a chat first.",
+        "Cannot identify the current conversation. Scroll to a message " +
+        "and try again, or reload the ChatGPT tab."
       );
     }
 
-    return main;
+    if (
+      expectedId &&
+      !matchingTurns.length &&
+      renderedTurns.some(
+        (turn) => {
+          const id = getTurnConversationId(turn);
+          return id && id !== expectedId;
+        }
+      )
+    ) {
+      throw new Error(
+        "ChatGPT still shows another conversation in its DOM. " +
+        "Reload this chat and try again."
+      );
+    }
+
+    const scroller = findScroller(anchor);
+    const root = scroller === document.scrollingElement ||
+      scroller === document.documentElement
+      ? anchor.closest("main") || scroller
+      : scroller;
+
+    return { root, anchor, expectedId, path: location.pathname };
   }
 
   function findScroller(element) {
@@ -400,14 +512,37 @@
    * Prefer data-turn-key because it provides stable identifiers
    * when the conversation uses virtualized scrolling.
    */
-  function getTurns(root) {
-    const matches = [...root.querySelectorAll("[data-turn-key]")];
+  function getTurns(context) {
+    const { root, expectedId } = context;
+    const keyed = [...root.querySelectorAll("[data-turn-key]")];
+    const turns = (keyed.length
+      ? keyed
+      : [...root.querySelectorAll("[data-testid='conversation-turn']")]
+    ).filter(isRenderedTurn);
 
-    if (matches.length > 0) {
-      return matches;
+    if (!expectedId) return turns;
+
+    // Some turns do not carry an ID, so don't silently mix threads
+    // when a SPA transition leaves more than one mounted in this root.
+    const ids = new Set(
+      turns.map(getTurnConversationId).filter(Boolean)
+    );
+
+    if (ids.size > 0 && !ids.has(expectedId)) {
+      throw new Error(
+        "The active chat hasn't finished mounting. " +
+        "Reload this conversation and retry."
+      );
     }
 
-    return [...root.querySelectorAll("[data-testid='conversation-turn']")];
+    if (ids.size > 1) {
+      throw new Error(
+        "Multiple conversations are mounted together. " +
+        "Reload this conversation before exporting."
+      );
+    }
+
+    return turns;
   }
 
   function turnKey(turn, index) {
@@ -422,8 +557,8 @@
   /**
    * Capture currently mounted conversation turns.
    */
-  function captureVisibleTurns(root, capturedTurns) {
-    const turns = getTurns(root);
+  function captureVisibleTurns(context, capturedTurns) {
+    const turns = getTurns(context);
 
     for (let index = 0; index < turns.length; index++) {
       const turn = turns[index];
@@ -453,10 +588,9 @@
   /**
    * Scroll through the conversation to collect virtualized turns.
    */
-  async function captureConversation(root) {
+  async function captureConversation(context) {
     const capturedTurns = new Map();
-    const firstTurn = getTurns(root)[0];
-    const scroller = findScroller(firstTurn || root);
+    const scroller = findScroller(context.anchor);
 
     const initialScrollTop = scroller.scrollTop;
     const initialScrollBehavior = scroller.style.scrollBehavior;
@@ -475,7 +609,10 @@
       let unchangedCount = 0;
 
       for (let index = 0; index < CONFIG.maximumScrollSteps; index++) {
-        captureVisibleTurns(root, capturedTurns);
+        if (location.pathname !== context.path) {
+          throw new Error("The active conversation changed during export.");
+        }
+        captureVisibleTurns(context, capturedTurns);
 
         if (index % 5 === 0) {
           showNotice(`Scanning conversation: ${capturedTurns.size} turns...`);
@@ -488,7 +625,7 @@
 
         if (scroller.scrollTop >= maxScroll - 2) {
           await sleep(CONFIG.scrollDelayMs);
-          captureVisibleTurns(root, capturedTurns);
+          captureVisibleTurns(context, capturedTurns);
           break;
         }
 
@@ -513,7 +650,7 @@
         previousPosition = actualPosition;
       }
 
-      captureVisibleTurns(root, capturedTurns);
+      captureVisibleTurns(context, capturedTurns);
     } finally {
       scroller.scrollTop = initialScrollTop;
       scroller.style.scrollBehavior = initialScrollBehavior;
@@ -1084,11 +1221,11 @@
     showNotice("Scanning ChatGPT conversation...");
 
     try {
-      const root = findConversationRoot();
+      const context = findConversationRoot();
 
       const captured = CONFIG.autoScroll
-        ? await captureConversation(root)
-        : captureSelection(root);
+        ? await captureConversation(context)
+        : captureSelection(context.root);
 
       const theme = outputFormat === "pdf-original" ? "original" : "light";
       const result = buildHTML(captured, theme);
