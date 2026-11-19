@@ -777,9 +777,44 @@
         max-width: 100%;
       }
 
-      pre {
-        max-width: 100%;
-        overflow-x: auto;
+      /*
+       * Captured ChatGPT flex/grid wrappers can inherit a min-content width
+       * from a long, unwrapped code line. This makes an entire user message
+       * wider than the export page and clips its left edge when right-aligned.
+       */
+      .export-turn,
+      .export-turn * {
+        min-width: 0 !important;
+      }
+
+      .export-turn :is(
+        div, section, article, main, aside, figure, blockquote,
+        p, ul, ol, li, pre
+      ) {
+        max-width: 100% !important;
+      }
+
+      .export-turn {
+        overflow-wrap: anywhere;
+      }
+
+      /*
+       * Computed inline styles take precedence over ordinary CSS. Override
+       * them explicitly so fenced code wraps in standalone HTML and PDF,
+       * without discarding indentation or intentional line breaks.
+       */
+      .export-turn pre,
+      .export-turn pre *,
+      .export-turn code {
+        white-space: pre-wrap !important;
+        overflow-wrap: anywhere !important;
+        word-break: break-word !important;
+      }
+
+      .export-turn pre {
+        width: 100% !important;
+        max-width: 100% !important;
+        overflow-x: visible !important;
       }
 
       table {
