@@ -372,6 +372,41 @@
         copied.style.removeProperty(property);
       }
 
+      // Reflow viewport-dependent HTML layout, without touching SVG/MathML
+      // internals (their coordinates and transforms are part of the artwork).
+      if (original instanceof HTMLElement) {
+        if (computed.whiteSpace === "nowrap") {
+          copied.style.whiteSpace = "normal";
+        } else if (computed.whiteSpace === "pre") {
+          copied.style.whiteSpace = "pre-wrap";
+        }
+
+        if (/(block|flex|grid|table)/.test(computed.display)) {
+          // Computed auto margins resolve to screen-specific pixel widths.
+          // Bound horizontal spacing to avoid overflowing narrow print pages.
+          for (const property of ["margin-left", "margin-right", "padding-left", "padding-right"]) {
+            const value = Number.parseFloat(computed.getPropertyValue(property));
+            if (Number.isFinite(value)) {
+              copied.style.setProperty(property, `${Math.max(0, Math.min(value, 24))}px`);
+            }
+          }
+        }
+
+        // Non-DIL grids also inherit pixel-sized tracks from the live page.
+        // Retain their relative widths, but let each track shrink and reflow.
+        if (computed.display.includes("grid")) {
+          const tracks = computed.gridTemplateColumns.trim().split(/\s+/);
+          if (tracks.length && tracks.every((track) => /^\d+(?:\.\d+)?px$/.test(track))) {
+            copied.style.gridTemplateColumns = tracks.map((track) =>
+              `minmax(0, ${Math.max(1, Number.parseFloat(track))}fr)`
+            ).join(" ");
+          }
+        }
+        if (computed.display.includes("flex") && computed.flexDirection.startsWith("row")) {
+          copied.style.flexWrap = "wrap";
+        }
+      }
+
       // Make ChatGPT component grids responsive.
       if (original.getAttribute("data-d-component") === "grid") {
         const tracks = computed.gridTemplateColumns
@@ -832,6 +867,45 @@
         content-visibility: visible !important;
       }
 
+      /* Responsive export geometry: leave SVG and MathML internals intact. */
+      .export-turn {
+        box-sizing: border-box !important;
+        padding: 0 12px !important;
+      }
+
+      .export-turn > :not(svg):not(math) {
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+      }
+
+      .export-turn *:not(svg):not(svg *):not(math):not(math *) {
+        box-sizing: border-box !important;
+        min-width: 0 !important;
+        max-width: 100% !important;
+        overflow-wrap: anywhere !important;
+        text-overflow: clip !important;
+      }
+
+      .export-turn img,
+      .export-turn svg[viewBox] {
+        max-width: 100% !important;
+        height: auto !important;
+      }
+
+      .export-turn svg,
+      .export-turn math {
+        max-width: 100% !important;
+      }
+
+      .export-turn :is(p, li, blockquote, h1, h2, h3, h4, h5, h6) {
+        white-space: pre-wrap !important;
+      }
+
+      .export-turn :is(pre, code) {
+        white-space: pre-wrap !important;
+        overflow-wrap: anywhere !important;
+      }
+
       /* Toolbar in exported HTML */
 
       .export-toolbar {
@@ -910,6 +984,17 @@
           margin-bottom: 20px !important;
           overflow: visible !important;
           break-inside: auto;
+        }
+
+        /* Keep all captured content inside the printable page box. */
+        .export-turn {
+          padding-left: 12px !important;
+          padding-right: 12px !important;
+        }
+
+        .export-turn :is(th, td) {
+          max-width: 100% !important;
+          overflow-wrap: anywhere !important;
         }
 
         [data-d-table-viewport],
