@@ -427,15 +427,6 @@
         }
       }
 
-      // Preserve current input values.
-      if (original instanceof HTMLInputElement) {
-        copied.setAttribute("value", original.value);
-      }
-
-      if (original instanceof HTMLTextAreaElement) {
-        copied.textContent = original.value;
-      }
-
       // Preserve SVG dimensions where CSS supplies sizing.
       if (
         original instanceof SVGElement &&
@@ -1053,6 +1044,106 @@
   }
 
   /**
+   * Rebuild captured content as passive HTML, SVG and MathML. Never copy
+   * arbitrary elements/attributes into the standalone print document.
+   */
+  function sanitizeExportContent(root, baseURL) {
+    const htmlNS = "http://www.w3.org/1999/xhtml";
+    const svgNS = "http://www.w3.org/2000/svg";
+    const mathNS = "http://www.w3.org/1998/Math/MathML";
+    const xlinkNS = "http://www.w3.org/1999/xlink";
+    const words = (value) => new Set(value.split(/\s+/));
+    const htmlTags = words("a abbr article aside b bdi bdo blockquote br caption cite code col colgroup dd del details dfn div dl dt em figcaption figure footer h1 h2 h3 h4 h5 h6 header hr i img ins kbd li main mark ol p pre q rp rt ruby s samp section small span strong sub summary sup table tbody td tfoot th thead time tr u ul var wbr");
+    const svgTags = words("svg g path rect circle ellipse line polyline polygon text tspan textPath defs symbol use image clipPath mask linearGradient radialGradient stop pattern marker title desc filter feBlend feColorMatrix feComponentTransfer feComposite feFlood feGaussianBlur feMerge feMergeNode feOffset feFuncR feFuncG feFuncB feFuncA feDropShadow feMorphology feTurbulence feDisplacementMap");
+    const mathTags = words("math mrow mi mn mo mtext mspace ms mfrac msqrt mroot mstyle merror mpadded mphantom mfenced menclose msub msup msubsup munder mover munderover mmultiscripts mprescripts none mtable mtr mtd semantics");
+    const dropTags = words("script style link meta base iframe frame frameset object embed applet portal fencedframe template noscript noembed noframes textarea input select option optgroup datalist canvas video audio source track foreignobject annotation annotation-xml");
+    const commonAttrs = words("id class title role dir lang aria-label aria-hidden aria-labelledby aria-describedby aria-level data-d-component data-d-has-border data-d-table-viewport data-turn-key data-measured-turn data-virtualized-turn-content data-export-role");
+    const htmlAttrs = words("alt width height colspan rowspan span scope headers start reversed value datetime open type");
+    const svgAttrs = words("viewBox preserveAspectRatio x y x1 y1 x2 y2 cx cy r rx ry width height d points pathLength transform fill fill-opacity fill-rule stroke stroke-width stroke-opacity stroke-linecap stroke-linejoin stroke-miterlimit stroke-dasharray stroke-dashoffset opacity clip-path clip-rule mask filter marker-start marker-mid marker-end vector-effect text-anchor dominant-baseline alignment-baseline dx dy rotate textLength lengthAdjust font-size font-family font-weight font-style gradientUnits gradientTransform spreadMethod offset stop-color stop-opacity fx fy fr patternUnits patternContentUnits patternTransform markerWidth markerHeight markerUnits refX refY orient maskUnits maskContentUnits clipPathUnits filterUnits primitiveUnits in in2 result stdDeviation mode type values operator k1 k2 k3 k4 flood-color flood-opacity tableValues slope intercept amplitude exponent scale xChannelSelector yChannelSelector baseFrequency numOctaves seed stitchTiles radius");
+    const mathAttrs = words("display mathvariant mathsize mathcolor mathbackground stretchy symmetric fence separator largeop movablelimits accent accentunder lspace rspace minsize maxsize linethickness columnalign rowalign columnspacing rowspacing columnspan rowspan notation width height depth voffset");
+    const styleProperties = new Set([...STYLE_PROPERTIES, "width", "height", "min-width", "min-height", "max-width", "max-height", "overflow", "overflow-x", "overflow-y", "top", "left", "right", "bottom", "border-collapse", "border-color", "border-width", "border-style", "visibility", "z-index", "list-style-position", "fill-opacity", "stroke-opacity", "clip-path", "mask", "filter"]);
+    const fragment = /^#[A-Za-z0-9_.:-]+$/;
+    const localPaint = /^url\(\s*["']?#[A-Za-z0-9_.:-]+["']?\s*\)$/i;
+    const safeDocument = document.implementation.createHTMLDocument("");
+
+    function safeURL(value, kind) {
+      const raw = value.trim();
+      if (fragment.test(raw) && kind !== "image") return raw;
+      if (kind === "local") return null;
+      if (kind === "image" && /^data:image\/(?:png|jpeg|gif|webp|avif|bmp|x-icon|vnd\.microsoft\.icon);base64,[a-z0-9+/=\s]+$/i.test(raw)) return raw;
+      try {
+        const url = new URL(raw, baseURL);
+        if (url.username || url.password) return null;
+        if (url.protocol === "https:" || (kind === "link" && url.protocol === "http:")) return url.href;
+      } catch {
+        // Invalid or unsupported URL.
+      }
+      return null;
+    }
+
+    function passiveCSS(value) {
+      if (/[\\<>]/.test(value)) return false;
+      if (localPaint.test(value)) return true;
+      return !/\b(?:url|image-set|image|cross-fade|paint|element|var|attr)\s*\(/i.test(value);
+    }
+
+    function rebuild(source) {
+      if (source.nodeType === Node.TEXT_NODE) return safeDocument.createTextNode(source.data);
+      if (source.nodeType !== Node.ELEMENT_NODE) return null;
+      const ns = source.namespaceURI;
+      const tag = source.localName;
+      if (dropTags.has(tag.toLowerCase())) return null;
+      if (ns !== htmlNS && ns !== svgNS && ns !== mathNS) return null;
+      if (ns === svgNS && !svgTags.has(tag)) return null;
+      if (ns === mathNS && !mathTags.has(tag)) return null;
+      // Unsupported HTML containers (including forms and buttons) become
+      // passive divs rather than retaining their interactive behavior.
+      const outputTag = ns === htmlNS && !htmlTags.has(tag) ? "div" : tag;
+      const output = safeDocument.createElementNS(ns, outputTag);
+
+      for (const attribute of source.attributes) {
+        const name = attribute.localName;
+        const value = attribute.value;
+        if (name === "style") continue;
+        if (name === "href" && (attribute.namespaceURI === null || attribute.namespaceURI === xlinkNS)) {
+          const kind = ns === svgNS && (tag === "use" || tag === "textPath" || tag === "linearGradient" || tag === "radialGradient" || tag === "pattern") ? "local" : ns === svgNS && tag === "image" ? "image" : tag === "a" ? "link" : null;
+          const url = kind && safeURL(value, kind);
+          if (url) output.setAttribute("href", url);
+          continue;
+        }
+        if (attribute.namespaceURI !== null) continue;
+        if (ns === htmlNS && tag === "img" && name === "src") {
+          const url = safeURL(value, "image");
+          if (url) output.setAttribute("src", url);
+          continue;
+        }
+        if (commonAttrs.has(name) || (ns === htmlNS && htmlAttrs.has(name)) || (ns === svgNS && svgAttrs.has(name) && passiveCSS(value)) || (ns === mathNS && mathAttrs.has(name) && passiveCSS(value))) {
+          output.setAttribute(name, value);
+        }
+      }
+      if (source.style && output.style) {
+        for (const property of source.style) {
+          const value = source.style.getPropertyValue(property);
+          if (styleProperties.has(property) && passiveCSS(value)) {
+            output.style.setProperty(property, value, source.style.getPropertyPriority(property));
+          }
+        }
+      }
+      if (ns === htmlNS && tag === "a") output.setAttribute("rel", "noopener noreferrer");
+      if ((ns === htmlNS && tag === "img") || (ns === svgNS && tag === "image")) output.setAttribute("referrerpolicy", "no-referrer");
+      for (const child of source.childNodes) {
+        const clean = rebuild(child);
+        if (clean) output.appendChild(clean);
+      }
+      return output;
+    }
+
+    const clean = rebuild(root);
+    if (!clean || clean.localName !== "main") throw new Error("Invalid export document root.");
+    return clean;
+  }
+
+  /**
    * Build the standalone HTML document.
    */
   function buildHTML({ documentRoot, count }, printTheme = CONFIG.defaultPrintTheme) {
@@ -1078,6 +1169,20 @@
       }
     }
 
+    const sanitizedRoot = sanitizeExportContent(documentRoot, document.baseURI);
+    const nonce = crypto.randomUUID().replaceAll("-", "");
+    const contentSecurityPolicy = [
+      "default-src 'none'",
+      `script-src 'nonce-${nonce}'`,
+      "style-src 'unsafe-inline'",
+      "img-src https: data:",
+      "base-uri 'none'",
+      "form-action 'none'",
+      "object-src 'none'",
+      "frame-src 'none'",
+      "connect-src 'none'",
+    ].join("; ");
+
     const toolbar = `
       <nav class="export-toolbar" aria-label="PDF export options">
         <strong>PDF appearance:</strong>
@@ -1093,14 +1198,13 @@
       (() => {
         for (
           const button of document.querySelectorAll(
-            "[data-export-print-theme]"
+            ".export-toolbar > button[data-export-print-theme]"
           )
         ) {
           button.addEventListener("click", () => {
-            document.documentElement.setAttribute(
-              "data-print-theme",
-              button.getAttribute("data-export-print-theme")
-            );
+            const theme = button.getAttribute("data-export-print-theme");
+            if (theme !== "light" && theme !== "original") return;
+            document.documentElement.setAttribute("data-print-theme", theme);
 
             window.print();
           });
@@ -1112,15 +1216,16 @@
       `<html lang="en" data-print-theme="${printTheme}">`,
       "<head>",
       '<meta charset="utf-8">',
+      `<meta http-equiv="Content-Security-Policy" content="${escapeHTML(contentSecurityPolicy)}">`,
+      '<meta name="referrer" content="no-referrer">',
       '<meta name="viewport" content="width=device-width, initial-scale=1">',
       `<title>${escapeHTML(document.title || "ChatGPT Conversation")}</title>`,
-      `<base href="${escapeHTML(document.baseURI)}">`,
       `<style>${makeCSS(isDark)}</style>`,
       "</head>",
       "<body>",
       toolbar,
-      documentRoot.outerHTML,
-      `<script>${printScript}</script>`,
+      sanitizedRoot.outerHTML,
+      `<script nonce="${nonce}">${printScript}</script>`,
       "</body>",
       "</html>",
     ].join("\n");
