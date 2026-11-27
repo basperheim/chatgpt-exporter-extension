@@ -46,4 +46,5 @@ limits; standalone HTML remains an alternative.
 
 ## License
 
-No license has been added yet. Choose an open-source license before publishing.
+This project is licensed under the MIT License.
+See the [LICENSE](LICENSE) file for details.
